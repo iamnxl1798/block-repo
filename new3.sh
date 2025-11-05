@@ -52,10 +52,11 @@ if [ ! -f "$WHITELIST_FILE" ]; then
 fi
 
 # --- Check if remote URL is in whitelist ---
+NORMALIZED_URL=$(echo "$REMOTE_URL" | sed -E 's#(git@|ssh://git@|https://|http://)##; s#:#/#')
 AUTHORIZED=0
 while IFS= read -r line; do
   [[ -z "$line" || "$line" == \#* ]] && continue  # skip empty or comment lines
-  if [[ "$REMOTE_URL" == *"$line"* ]]; then
+  if [[ "$NORMALIZED_URL" == *"$line"* ]]; then
     AUTHORIZED=1
     break
   fi
