@@ -1,23 +1,21 @@
 #!/bin/bash
 # ======================================================
-# Global Git pre-push hook
-# Prevents pushes to unauthorized repositories (any host)
-# Supports: GitHub, GitLab, Bitbucket, and self-hosted servers
+# Universal Global Git pre-push hook
+# Blocks unauthorized repositories (GitHub, GitLab, Bitbucket, etc.)
 # ======================================================
 
 REMOTE_NAME="$1"
 REMOTE_URL="$2"
 
-# --- Resolve remote URL if not provided ---
 if [ -z "$REMOTE_URL" ]; then
   REMOTE_URL=$(git remote get-url "$REMOTE_NAME" 2>/dev/null || echo "")
 fi
 
-# --- Configuration ---
+# --- Config ---
 WHITELIST_FILE="$HOME/.git/hooks/whitelist.txt"
 SENTRY_URL="https://sentry.gem-corp.tech/api/7/store/"
 SENTRY_KEY="c04662ba996ca859544095fa54b7d05b"
-DEBUG=false  # Set to true to show debug logs
+DEBUG=false
 
 # --- Environment info ---
 USER_OS=$(whoami)
@@ -27,7 +25,7 @@ EXPECTED_REPO_URL=$(git remote get-url origin 2>/dev/null || echo "unknown")
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S")
 
 # ======================================================
-# Helper: Send alert to Sentry
+# Helper: Sentry notification
 # ======================================================
 send_sentry_notification() {
   local payload=$(cat <<EOF
@@ -55,59 +53,64 @@ EOF
 }
 
 # ======================================================
-# Step 1: Verify whitelist exists
+# Step 1: Ensure whitelist exists
 # ======================================================
 if [ ! -f "$WHITELIST_FILE" ]; then
   echo "⚠️  Whitelist not found at: $WHITELIST_FILE"
   echo "   Create it with one allowed repo per line, e.g.:"
-  echo "   github.com/org/repo.git"
-  echo "   gitlab.com/group/repo.git"
-  echo "   bitbucket.org/team/repo.git"
+  echo "   github.com/org/repo"
+  echo "   gitlab.com/team/repo"
   exit 1
 fi
 
 # ======================================================
-# Step 2: Normalize the remote URL (universal)
+# Step 2: Normalize remote URL (universal)
 # ======================================================
-# 1. Remove common prefixes: git@, ssh://, https://, http://
-NORMALIZED_URL=$(echo "$REMOTE_URL" | sed -E 's#(ssh://|git@|https://|http://)##')
+NORMALIZED_URL=$(echo "$REMOTE_URL" | sed -E '
+  s#(ssh://|git@|https://|http://)##;    # remove protocols
+  s#:#/#;                                # convert ":" to "/"
+  s#^[^@]+@##;                           # drop username before host
+  s#//#/#g;                              # collapse double slashes
+  s#\.git$##;                            # remove .git
+')
 
-# 2. Convert colon (:) to slash for git@host:user/repo.git → host/user/repo.git
-NORMALIZED_URL=$(echo "$NORMALIZED_URL" | sed -E 's#:#/#')
-
-# 3. Remove optional username before host (e.g., user@host → host)
-NORMALIZED_URL=$(echo "$NORMALIZED_URL" | sed -E 's#^[^@]+@##')
-
-# 4. Collapse duplicate slashes
-NORMALIZED_URL=$(echo "$NORMALIZED_URL" | sed -E 's#//#/#g')
-
-# 5. Trim trailing ".git" if present (normalize both forms)
-NORMALIZED_URL=$(echo "$NORMALIZED_URL" | sed -E 's#\.git$##')
-
-$DEBUG && echo "[DEBUG] Raw remote URL: $REMOTE_URL"
-$DEBUG && echo "[DEBUG] Normalized URL:  $NORMALIZED_URL"
+$DEBUG && echo "[DEBUG] Remote: $REMOTE_URL"
+$DEBUG && echo "[DEBUG] Normalized: $NORMALIZED_URL"
 
 # ======================================================
-# Step 3: Check against whitelist
+# Step 3: Check whitelist (supports wildcard-style)
 # ======================================================
 AUTHORIZED=0
+
 while IFS= read -r line || [ -n "$line" ]; do
-  # Normalize line endings and trim whitespace
+  # Trim CRLF and spaces
   line=$(echo "$line" | tr -d '\r' | xargs)
   [[ -z "$line" || "$line" == \#* ]] && continue
 
-  # Normalize whitelist entry (remove .git suffix)
+  # Normalize whitelist entry (remove .git if present)
   line=$(echo "$line" | sed -E 's#\.git$##')
 
-  # Exact match check
+  # Match rules:
+  # - Exact match: github.com/org/repo == github.com/org/repo
+  # - Host+repo match: github.com/repo == github.com/*/repo
   if [[ "$NORMALIZED_URL" == "$line" ]]; then
     AUTHORIZED=1
     break
   fi
+
+  # If whitelist entry has only host/repo (no org), allow any org for that repo
+  if [[ "$line" =~ ^([^/]+)/([^/]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+    if [[ "$NORMALIZED_URL" == "$host"/*"/$repo" ]]; then
+      AUTHORIZED=1
+      break
+    fi
+  fi
 done < "$WHITELIST_FILE"
 
 # ======================================================
-# Step 4: Block unauthorized repos
+# Step 4: Handle unauthorized push
 # ======================================================
 if [ $AUTHORIZED -ne 1 ]; then
   echo "❌ Push to unauthorized repo '$REMOTE_NAME' blocked!"
@@ -117,13 +120,12 @@ if [ $AUTHORIZED -ne 1 ]; then
   echo "🔒 Allowed repositories (whitelist):"
   cat "$WHITELIST_FILE"
   echo ""
-
-  #send_sentry_notification
+  send_sentry_notification
   exit 1
 fi
 
 # ======================================================
-# Step 5: Run local pre-push hook if present
+# Step 5: Chain local repo hook
 # ======================================================
 LOCAL_HOOK=".git/hooks/pre-push"
 
