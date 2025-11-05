@@ -1,1 +1,142 @@
-aa
+#!/bin/bash
+# ======================================================
+# Global Git pre-push hook
+# Prevents pushes to unauthorized repositories (any host)
+# Supports: GitHub, GitLab, Bitbucket, and self-hosted servers
+# ======================================================
+
+REMOTE_NAME="$1"
+REMOTE_URL="$2"
+
+# --- Resolve remote URL if not provided ---
+if [ -z "$REMOTE_URL" ]; then
+  REMOTE_URL=$(git remote get-url "$REMOTE_NAME" 2>/dev/null || echo "")
+fi
+
+# --- Configuration ---
+WHITELIST_FILE="$HOME/.git/hooks/whitelist.txt"
+SENTRY_URL="https://sentry.gem-corp.tech/api/7/store/"
+SENTRY_KEY="c04662ba996ca859544095fa54b7d05b"
+DEBUG=false  # Set to true to show debug logs
+
+# --- Environment info ---
+USER_OS=$(whoami)
+GIT_USER=$(git config user.name)
+GIT_EMAIL=$(git config user.email)
+EXPECTED_REPO_URL=$(git remote get-url origin 2>/dev/null || echo "unknown")
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S")
+
+# ======================================================
+# Helper: Send alert to Sentry
+# ======================================================
+send_sentry_notification() {
+  local payload=$(cat <<EOF
+{
+  "message": "❌ Unauthorized Git push attempt detected",
+  "level": "error",
+  "logger": "global.pre-push.hook",
+  "platform": "bash",
+  "extra": {
+    "os_user": "$USER_OS",
+    "git_user": "$GIT_USER",
+    "git_email": "$GIT_EMAIL",
+    "unauthorized_repo": "$REMOTE_URL",
+    "expected_repo": "$EXPECTED_REPO_URL",
+    "timestamp": "$TIMESTAMP"
+  }
+}
+EOF
+  )
+
+  curl -s -X POST "$SENTRY_URL" \
+    -H "Content-Type: application/json" \
+    -H "X-Sentry-Auth: Sentry sentry_version=7, sentry_client=curl/1.0, sentry_key=$SENTRY_KEY" \
+    -d "$payload" >/dev/null 2>&1
+}
+
+# ======================================================
+# Step 1: Verify whitelist exists
+# ======================================================
+if [ ! -f "$WHITELIST_FILE" ]; then
+  echo "⚠️  Whitelist not found at: $WHITELIST_FILE"
+  echo "   Create it with one allowed repo per line, e.g.:"
+  echo "   github.com/org/repo.git"
+  echo "   gitlab.com/group/repo.git"
+  echo "   bitbucket.org/team/repo.git"
+  exit 1
+fi
+
+# ======================================================
+# Step 2: Normalize the remote URL (universal)
+# ======================================================
+# 1. Remove common prefixes: git@, ssh://, https://, http://
+NORMALIZED_URL=$(echo "$REMOTE_URL" | sed -E 's#(ssh://|git@|https://|http://)##')
+
+# 2. Convert colon (:) to slash for git@host:user/repo.git → host/user/repo.git
+NORMALIZED_URL=$(echo "$NORMALIZED_URL" | sed -E 's#:#/#')
+
+# 3. Remove optional username before host (e.g., user@host → host)
+NORMALIZED_URL=$(echo "$NORMALIZED_URL" | sed -E 's#^[^@]+@##')
+
+# 4. Collapse duplicate slashes
+NORMALIZED_URL=$(echo "$NORMALIZED_URL" | sed -E 's#//#/#g')
+
+# 5. Trim trailing ".git" if present (normalize both forms)
+NORMALIZED_URL=$(echo "$NORMALIZED_URL" | sed -E 's#\.git$##')
+
+$DEBUG && echo "[DEBUG] Raw remote URL: $REMOTE_URL"
+$DEBUG && echo "[DEBUG] Normalized URL:  $NORMALIZED_URL"
+
+# ======================================================
+# Step 3: Check against whitelist
+# ======================================================
+AUTHORIZED=0
+while IFS= read -r line || [ -n "$line" ]; do
+  # Normalize line endings and trim whitespace
+  line=$(echo "$line" | tr -d '\r' | xargs)
+  [[ -z "$line" || "$line" == \#* ]] && continue
+
+  # Normalize whitelist entry (remove .git suffix)
+  line=$(echo "$line" | sed -E 's#\.git$##')
+
+  # Exact match check
+  if [[ "$NORMALIZED_URL" == "$line" ]]; then
+    AUTHORIZED=1
+    break
+  fi
+done < "$WHITELIST_FILE"
+
+# ======================================================
+# Step 4: Block unauthorized repos
+# ======================================================
+if [ $AUTHORIZED -ne 1 ]; then
+  echo "❌ Push to unauthorized repo '$REMOTE_NAME' blocked!"
+  echo "   URL: $REMOTE_URL"
+  echo "   Normalized: $NORMALIZED_URL"
+  echo ""
+  echo "🔒 Allowed repositories (whitelist):"
+  cat "$WHITELIST_FILE"
+  echo ""
+
+  #send_sentry_notification
+  exit 1
+fi
+
+# ======================================================
+# Step 5: Run local pre-push hook if present
+# ======================================================
+LOCAL_HOOK=".git/hooks/pre-push"
+
+if [ -x "$LOCAL_HOOK" ]; then
+  echo "[Global Hook] Running local pre-push hook from $LOCAL_HOOK..."
+  "$LOCAL_HOOK" "$@"
+  LOCAL_STATUS=$?
+  if [ $LOCAL_STATUS -ne 0 ]; then
+    echo "[Global Hook] Local pre-push hook failed (exit code $LOCAL_STATUS)."
+    exit $LOCAL_STATUS
+  fi
+else
+  echo "[Global Hook] No local pre-push hook found — continuing."
+fi
+
+exit 0
