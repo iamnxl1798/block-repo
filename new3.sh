@@ -1,13 +1,13 @@
 #!/bin/bash
-#
-# Global pre-push hook with whitelist + Sentry notification + local hook chaining
-#
 
 REMOTE_NAME="$1"
 REMOTE_URL="$2"
 
+if [ -z "$REMOTE_URL" ]; then
+  REMOTE_URL=$(git remote get-url "$REMOTE_NAME" 2>/dev/null || echo "")
+fi
 # --- Configurable paths ---
-WHITELIST_FILE="$HOME/.git/github_whitelist.txt"  # chứa danh sách URL hoặc từ khóa whitelist
+WHITELIST_FILE="$HOME/.git/hooks/whitelist.txt"
 SENTRY_URL="https://sentry.gem-corp.tech/api/7/store/"
 SENTRY_KEY="c04662ba996ca859544095fa54b7d05b"
 
@@ -43,7 +43,7 @@ EOF
     -H "X-Sentry-Auth: Sentry sentry_version=7, sentry_client=curl/1.0, sentry_key=$SENTRY_KEY" \
     -d "$payload" >/dev/null 2>&1
 }
-git
+
 # --- Check whitelist existence ---
 if [ ! -f "$WHITELIST_FILE" ]; then
   echo "⚠️  Whitelist file not found at $WHITELIST_FILE"
