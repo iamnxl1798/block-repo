@@ -1,8 +1,4 @@
 #!/bin/bash
-# ======================================================
-# 🌐 Universal Git pre-push hook
-# Supports GitHub, GitLab, Bitbucket, and Enterprise servers
-# ======================================================
 
 REMOTE_NAME="$1"
 REMOTE_URL="$2"
@@ -15,7 +11,7 @@ fi
 WHITELIST_FILE="$(dirname "$0")/whitelist.txt"
 SENTRY_URL="https://sentry.gem-corp.tech/api/7/store/"
 SENTRY_KEY="c04662ba996ca859544095fa54b7d05b"
-DEBUG=false
+DEBUG=true   # Enable debug output
 
 # --- Metadata ---
 USER_OS=$(whoami)
@@ -45,10 +41,10 @@ send_sentry_notification() {
 }
 EOF
   )
-  curl -s -X POST "$SENTRY_URL" \
-    -H "Content-Type: application/json" \
-    -H "X-Sentry-Auth: Sentry sentry_version=7, sentry_client=curl/1.0, sentry_key=$SENTRY_KEY" \
-    -d "$payload" >/dev/null 2>&1
+  # curl -s -X POST "$SENTRY_URL" \
+  #   -H "Content-Type: application/json" \
+  #   -H "X-Sentry-Auth: Sentry sentry_version=7, sentry_client=curl/1.0, sentry_key=$SENTRY_KEY" \
+  #   -d "$payload" >/dev/null 2>&1
 }
 
 # ======================================================
@@ -69,8 +65,7 @@ normalize_url() {
 # Check whitelist existence
 # ======================================================
 if [ ! -f "$WHITELIST_FILE" ]; then
-  echo "⚠️  Whitelist not found at $WHITELIST_FILE"
-  echo "   Create it with one allowed Git URL per line."
+  echo "⚠️ Whitelist not found at $WHITELIST_FILE"
   exit 1
 fi
 
@@ -78,6 +73,15 @@ fi
 # Normalize remote
 # ======================================================
 NORMALIZED_REMOTE=$(normalize_url "$REMOTE_URL")
+
+if [ "$DEBUG" = true ]; then
+  echo "=== DEBUG INFO ==="
+  echo "Remote name: $REMOTE_NAME"
+  echo "Original remote URL: $REMOTE_URL"
+  echo "Normalized remote: $NORMALIZED_REMOTE"
+  echo "Whitelist file: $WHITELIST_FILE"
+  echo "=================="
+fi
 
 AUTHORIZED=0
 
@@ -90,21 +94,31 @@ while IFS= read -r line || [ -n "$line" ]; do
 
   NORMALIZED_LINE=$(normalize_url "$line")
 
-  # Wildcard support (github.com/org/*)
+  if [ "$DEBUG" = true ]; then
+    echo "Checking whitelist entry: '$line' -> '$NORMALIZED_LINE'"
+  fi
+
+  # Wildcard support
   if [[ "$NORMALIZED_LINE" == *"*"* ]]; then
     PATTERN="^${NORMALIZED_LINE//\*/.*}$"
     if [[ "$NORMALIZED_REMOTE" =~ $PATTERN ]]; then
       AUTHORIZED=1
+      $DEBUG && echo "MATCH via wildcard: $PATTERN"
       break
     fi
-  # Fuzzy match: allow if whitelist matches suffix (repo) or parent org
+  # Exact or fuzzy match
   elif [[ "$NORMALIZED_REMOTE" == "$NORMALIZED_LINE" ]] || \
        [[ "$NORMALIZED_REMOTE" == */"$NORMALIZED_LINE" ]] || \
        [[ "$NORMALIZED_REMOTE" == "$NORMALIZED_LINE"/* ]]; then
     AUTHORIZED=1
+    $DEBUG && echo "MATCH via exact/fuzzy: $NORMALIZED_LINE"
     break
   fi
 done < "$WHITELIST_FILE"
+
+if [ "$DEBUG" = true ]; then
+  echo "AUTHORIZED = $AUTHORIZED"
+fi
 
 # ======================================================
 # Block unauthorized pushes
@@ -112,14 +126,18 @@ done < "$WHITELIST_FILE"
 if [ $AUTHORIZED -ne 1 ]; then
   echo "❌ Push to unauthorized repo '$REMOTE_NAME' blocked!"
   echo "   URL: $REMOTE_URL"
-  #send_sentry_notification
+  echo "   Normalized: $NORMALIZED_REMOTE"
+  echo ""
+  echo "🔒 Allowed repositories (whitelist):"
+  cat "$WHITELIST_FILE"
+  # send_sentry_notification
   exit 1
 fi
 
 # ======================================================
 # Run local pre-push if exists
 # ======================================================
-LOCAL_HOOK=".git/hooks/pre-push"
+LOCAL_HOOK=".git/hooks/pre-push.local"
 
 if [ -x "$LOCAL_HOOK" ]; then
   echo "[Global Hook] Running local pre-push hook from $LOCAL_HOOK..."
